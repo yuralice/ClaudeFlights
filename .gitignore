@@ -1,0 +1,10 @@
+# Generated output — recreated on each run
+flight_report.html
+
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
