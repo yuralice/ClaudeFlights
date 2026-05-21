@@ -5,11 +5,11 @@ Flight Price Comparison — IAH → Asia (December 2026)
 
 Setup:
     pip install -r requirements.txt
-    cp .env.example .env   # add your Kiwi API key
+    cp .env.example .env   # add your SerpAPI key
     python flight_search.py
 
-Get a free Kiwi API key at: https://tequila.kiwi.com/
-(Sign up → My Apps → Create new app → copy the API key)
+Get a free SerpAPI key at: https://serpapi.com/
+(Sign up → Dashboard → copy your API key)
 """
 
 import os
@@ -29,14 +29,13 @@ except ImportError:
 
 # ─── SEARCH PARAMETERS ────────────────────────────────────────────────────────
 
-KIWI_API_KEY = os.getenv("KIWI_API_KEY", "")
-KIWI_BASE    = "https://api.tequila.kiwi.com/v2/search"
+SERP_API_KEY = os.getenv("SERPAPI_KEY", os.getenv("SERP_API_KEY", ""))
+SERP_BASE    = "https://serpapi.com/search"
 
 ORIGIN      = "IAH"
-DATE_FROM   = "18/12/2026"
-DATE_TO     = "21/12/2026"
+DATE_FROM   = "2026-12-18"
+DATE_TO     = "2026-12-21"
 CURRENCY    = "USD"
-MAX_RESULTS = 5
 
 DESTINATIONS = [
     {"code": "NRT", "name": "Tokyo Narita",   "country": "Japan",             "flag": "🇯🇵"},
@@ -47,18 +46,22 @@ DESTINATIONS = [
     {"code": "HKG", "name": "Hong Kong",      "country": "Hub / Gateway",     "flag": "🇭🇰"},
 ]
 
-# Cabin code → Kiwi code, display name, passenger config, infant note
+# travel_class: 2=Premium Economy, 3=Business
 CABINS = [
     {
         "code": "W",
+        "travel_class": 2,
         "name": "Premium Economy",
-        "pax": {"adults": 2, "children": 1},
+        "adults": 2,
+        "children": 1,
         "infant_note": "Daughter needs own seat — booked as child fare",
     },
     {
         "code": "C",
+        "travel_class": 3,
         "name": "Business Class",
-        "pax": {"adults": 2, "infants": 1},
+        "adults": 2,
+        "children": 0,
         "infant_note": "Daughter as lap infant — typically 10% of adult fare",
     },
 ]
@@ -168,25 +171,61 @@ AWARD_OPTIONS = [
 
 # ─── FLIGHT SEARCH ────────────────────────────────────────────────────────────
 
-def search_kiwi(destination, cabin):
+def _parse_serp_flight(f, cabin, destination):
+    legs      = f.get("flights", [])
+    first_leg = legs[0] if legs else {}
+    last_leg  = legs[-1] if legs else {}
+
+    dep_raw = first_leg.get("departure_airport", {}).get("time", "")
+    arr_raw = last_leg.get("arrival_airport", {}).get("time", "")
+    try:
+        dep_str = datetime.strptime(dep_raw, "%Y-%m-%d %H:%M").strftime("%a %b %d, %H:%M")
+    except Exception:
+        dep_str = dep_raw[:16] or "—"
+    try:
+        arr_str = datetime.strptime(arr_raw, "%Y-%m-%d %H:%M").strftime("%a %b %d, %H:%M")
+    except Exception:
+        arr_str = arr_raw[:16] or "—"
+
+    total_min = f.get("total_duration", 0)
+    h, m      = divmod(total_min, 60)
+
+    airlines = list({leg.get("airline", "?") for leg in legs})
+    stops    = len(legs) - 1
+
+    return {
+        "price":            f.get("price", 0),
+        "airline":          ", ".join(airlines),
+        "duration":         f"{h}h {m:02d}m",
+        "stops":            stops,
+        "departure":        dep_str,
+        "arrival":          arr_str,
+        "link":             f.get("booking_token", "#"),
+        "cabin":            cabin["name"],
+        "infant_note":      cabin["infant_note"],
+        "destination":      destination["name"],
+        "destination_code": destination["code"],
+        "flag":             destination["flag"],
+        "country":          destination["country"],
+    }
+
+
+def search_serp(destination, cabin):
     params = {
-        "fly_from": ORIGIN,
-        "fly_to": destination["code"],
-        "date_from": DATE_FROM,
-        "date_to": DATE_TO,
-        "curr": CURRENCY,
-        "sort": "price",
-        "limit": MAX_RESULTS,
-        "selected_cabins": cabin["code"],
-        **cabin["pax"],
+        "engine":        "google_flights",
+        "departure_id":  ORIGIN,
+        "arrival_id":    destination["code"],
+        "outbound_date": DATE_FROM,
+        "currency":      CURRENCY,
+        "hl":            "en",
+        "travel_class":  cabin["travel_class"],
+        "adults":        cabin["adults"],
+        "children":      cabin["children"],
+        "type":          "2",  # one-way
+        "api_key":       SERP_API_KEY,
     }
     try:
-        r = requests.get(
-            KIWI_BASE,
-            headers={"apikey": KIWI_API_KEY},
-            params=params,
-            timeout=30,
-        )
+        r = requests.get(SERP_BASE, params=params, timeout=30)
         r.raise_for_status()
         data = r.json()
     except requests.RequestException as e:
@@ -194,36 +233,8 @@ def search_kiwi(destination, cabin):
         return []
 
     results = []
-    for f in data.get("data", []):
-        dep = f.get("local_departure", "")
-        arr = f.get("local_arrival", "")
-        try:
-            dep_str = datetime.fromisoformat(dep.replace("Z", "")).strftime("%a %b %d, %H:%M")
-        except Exception:
-            dep_str = dep[:16] or "—"
-        try:
-            arr_str = datetime.fromisoformat(arr.replace("Z", "")).strftime("%a %b %d, %H:%M")
-        except Exception:
-            arr_str = arr[:16] or "—"
-
-        secs = f.get("duration", {}).get("total", 0)
-        h, m = divmod(secs // 60, 60)
-
-        results.append({
-            "price":            f.get("price", 0),
-            "airline":          ", ".join(f.get("airlines", ["?"])),
-            "duration":         f"{h}h {m:02d}m",
-            "stops":            len(f.get("route", [])) - 1,
-            "departure":        dep_str,
-            "arrival":          arr_str,
-            "link":             f.get("deep_link", "#"),
-            "cabin":            cabin["name"],
-            "infant_note":      cabin["infant_note"],
-            "destination":      destination["name"],
-            "destination_code": destination["code"],
-            "flag":             destination["flag"],
-            "country":          destination["country"],
-        })
+    for f in data.get("best_flights", []) + data.get("other_flights", []):
+        results.append(_parse_serp_flight(f, cabin, destination))
     return results
 
 
@@ -419,12 +430,12 @@ def build_html(flights, is_demo):
         demo_banner = """
 <div class="demo-banner">
   <strong>⚠ Demo Mode — Sample Prices</strong> &nbsp;&middot;&nbsp;
-  Real-time results require a free Kiwi API key.
-  Sign up at <strong>tequila.kiwi.com</strong>, then run:
-  <code>KIWI_API_KEY=your_key_here python flight_search.py</code>
+  Real-time results require a free SerpAPI key.
+  Sign up at <strong>serpapi.com</strong>, then run:
+  <code>SERPAPI_KEY=your_key_here python flight_search.py</code>
 </div>"""
 
-    source = "Demo / sample data" if is_demo else "Kiwi/Tequila API (live)"
+    source = "Demo / sample data" if is_demo else "SerpAPI / Google Flights (live)"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -502,12 +513,12 @@ def build_html(flights, is_demo):
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
-    is_demo = not bool(KIWI_API_KEY)
+    is_demo = not bool(SERP_API_KEY)
 
     if is_demo:
-        print("ℹ  No KIWI_API_KEY found — running in demo mode with sample data.")
-        print("   Get a free key: https://tequila.kiwi.com/")
-        print("   Then: KIWI_API_KEY=your_key python flight_search.py\n")
+        print("ℹ  No SERPAPI_KEY found — running in demo mode with sample data.")
+        print("   Get a free key: https://serpapi.com/")
+        print("   Then: SERPAPI_KEY=your_key python flight_search.py\n")
         flights = get_demo_flights()
     else:
         print(f"🔍 Searching {len(DESTINATIONS)} destinations × {len(CABINS)} cabins from {ORIGIN} (Dec 18–21, 2026)...")
@@ -515,7 +526,7 @@ def main():
         for dest in DESTINATIONS:
             for cabin in CABINS:
                 print(f"   {dest['flag']} {dest['code']} / {cabin['name']}...", end=" ", flush=True)
-                results = search_kiwi(dest, cabin)
+                results = search_serp(dest, cabin)
                 flights.extend(results)
                 print(f"({len(results)} results)")
         print(f"\n✓  {len(flights)} total flight options collected.\n")
