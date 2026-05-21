@@ -213,7 +213,7 @@ def search_kiwi(destination, cabin):
             "price":            f.get("price", 0),
             "airline":          ", ".join(f.get("airlines", ["?"])),
             "duration":         f"{h}h {m:02d}m",
-            "stops":            len(f.get("route", [])) - 1,
+            "stops":            max(0, len(f.get("route", [])) - 1),
             "departure":        dep_str,
             "arrival":          arr_str,
             "link":             f.get("deep_link", "#"),
